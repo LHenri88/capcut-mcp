@@ -6,7 +6,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 authors = [
-    { name = "Henri88", email = "lh882220@gmail.com" },
+    { name = "Henri8", email = "lh882220@gmail.com" },
 ]
 keywords = ["mcp", "capcut", "video-editing", "claude", "llm-agent"]
 classifiers = [
@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/REPLACE_ME/capcut-mcp"
+Repository = "https://github.com/LHenri88/capcut-mcp"
 
 [project.scripts]
 capcut-mcp = "capcut_mcp.server:main"

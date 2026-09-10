@@ -191,7 +191,7 @@ this was verified against real local drafts rather than assumed:
   CapCut ships with itself — the same file for every clip, not a per-clip
   derived output — so there's nothing to precompute; flipping the flag is what
   CapCut's own "Reduce noise" toggle does. `is_denoise: true` is CapCut's own
-  default on nearly every clip observed, so an explicit off→on toggle in a
+  default on nearly every clip observed, so an explicit off-to-on toggle in a
   real project hasn't been directly observed — confirm audibly (or in CapCut)
   on anything noise-critical.
 - **Vocal/music separation and background removal (matting) do not.** A real

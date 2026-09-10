@@ -188,11 +188,35 @@ def find_denoise_model() -> str | None:
     vocal separation), so a new clip we create needs the same reference to
     match what CapCut itself would have written.
     """
+    return _find_in_capcut_apps("Resources/audiosami/unet_denoise_*.model")
+
+
+def find_bundled_font() -> str | None:
+    """Locate a font file bundled with CapCut itself.
+
+    ffmpeg's drawtext filter needs a font, normally resolved through
+    fontconfig -- but plenty of Windows machines (and this ffmpeg build in
+    particular) have no working fontconfig install at all, which makes
+    drawtext fail outright rather than fall back to anything. CapCut is
+    already a hard requirement for this whole package, and it ships its own
+    font set, so that is a far more dependable source than assuming a system
+    font exists at some hardcoded path.
+    """
+    return (
+        _find_in_capcut_apps("Resources/Font/SystemFont/NotoSans-Regular.ttf")
+        or _find_in_capcut_apps("Resources/Font/SystemFont/en.ttf")
+    )
+
+
+def _find_in_capcut_apps(glob_pattern: str) -> str | None:
+    """Search every installed CapCut version's Apps folder for a glob match,
+    newest version first."""
     import string as _string
 
-    candidates: list[Path] = []
+    roots: list[Path] = []
     env = os.environ.get(ENV_DRAFT_ROOT)
-    roots = [Path(env).parent.parent.parent] if env else []
+    if env:
+        roots.append(Path(env).parent.parent.parent)
     for letter in _string.ascii_uppercase:
         for name in _APP_NAMES:
             roots.append(Path(f"{letter}:/") / name / "Apps")
@@ -205,13 +229,11 @@ def find_denoise_model() -> str | None:
         except OSError:
             continue
         for version_dir in versions:
-            hits = list(version_dir.glob("Resources/audiosami/unet_denoise_*.model"))
+            hits = list(version_dir.glob(glob_pattern))
             if hits:
-                candidates.append(hits[0])
-        if candidates:
-            break
+                return str(hits[0])
 
-    return str(candidates[0]) if candidates else None
+    return None
 
 
 def probe(explicit_root: str | None = None) -> dict:

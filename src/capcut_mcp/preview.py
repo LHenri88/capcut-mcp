@@ -16,6 +16,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from . import paths
+
 VISUAL_KINDS = {"video", "photo", "image"}
 AUDIO_KINDS = {"audio", "video"}
 
@@ -27,6 +29,38 @@ class PreviewError(RuntimeError):
 def _escape_drawtext(text: str) -> str:
     out = text.replace("\\", "\\\\").replace(":", r"\:").replace("'", r"\'")
     return out.replace("%", r"\%").replace(",", r"\,")
+
+
+_DEFAULT_FONT_CANDIDATES = (
+    r"C:\Windows\Fonts\segoeui.ttf",
+    r"C:\Windows\Fonts\arial.ttf",
+    r"C:\Windows\Fonts\calibri.ttf",
+    r"C:\Windows\Fonts\tahoma.ttf",
+)
+_default_font_cache: str | None | bool = False  # False = not looked up yet
+
+
+def _default_font() -> str | None:
+    """A font file ffmpeg's drawtext can use without needing fontconfig.
+
+    Many Windows ffmpeg builds have no working fontconfig install at all --
+    drawtext then fails outright on any text clip with "Cannot load default
+    config file", even though the render has nothing to do with fonts beyond
+    picking one. Passing an explicit fontfile sidesteps fontconfig entirely.
+
+    CapCut's own bundled font is tried first: it is a hard requirement for
+    this whole package already, so it is a far more dependable source than
+    guessing at a system font's path -- confirmed necessary on at least one
+    real machine where C:\\Windows\\Fonts had no font files in it at all.
+    Cached after the first lookup since the filesystem doesn't change mid-run.
+    """
+    global _default_font_cache
+    if _default_font_cache is False:
+        _default_font_cache = (
+            paths.find_bundled_font()
+            or next((f for f in _DEFAULT_FONT_CANDIDATES if Path(f).is_file()), None)
+        )
+    return _default_font_cache
 
 
 def _visual_clips(doc: dict) -> list[dict]:
@@ -63,6 +97,7 @@ def build_command(
     with_audio: bool = True,
     font: str | None = None,
 ) -> list[str]:
+    font = font or _default_font()
     src_w, src_h = doc.get("width") or 1920, doc.get("height") or 1080
     fps = doc.get("fps") or 30
     scale = height / src_h
@@ -77,7 +112,16 @@ def build_command(
 
     args += ["-f", "lavfi", "-t", f"{span:.3f}", "-i", f"color=c=black:s={width}x{height}:r={fps}"]
     base = "[0:v]"
-    inputs = 1
+    # `next_input` tracks the next REAL ffmpeg -i stream index -- it must only
+    # advance when an -i is actually added below. `seq` is a separate counter
+    # used purely to keep filtergraph label names unique; a text overlay
+    # produces a label but consumes no ffmpeg input, so sharing one counter
+    # between the two desyncs every real clip's `{idx}:v` reference from the
+    # actual number of -i flags in `args` -- ffmpeg then rejects the whole
+    # graph with "Invalid file index N" the moment a text clip is followed by
+    # another real clip.
+    next_input = 1
+    seq = 0
     audio_labels: list[str] = []
 
     for clip in _visual_clips(doc):
@@ -89,7 +133,14 @@ def build_command(
         visible_from, visible_to = max(clip_start, 0.0), min(clip_end, span)
 
         if clip["_type"] == "text":
-            label = f"[t{inputs}]"
+            if not font:
+                # No font anywhere -- neither CapCut's bundled one nor a
+                # guessed system path -- and ffmpeg's drawtext cannot draw
+                # text at all without one. Skip just this overlay rather than
+                # failing the whole render; every other clip still composites.
+                continue
+            seq += 1
+            label = f"[t{seq}]"
             size = int(round((clip.get("font_size") or 15) * scale * 3.2))
             x = int(round(width / 2 + clip.get("position", {}).get("x", 0.0) * width / 2))
             y = int(round(height / 2 - clip.get("position", {}).get("y", 0.0) * height / 2))
@@ -98,12 +149,10 @@ def build_command(
                 f":fontsize={size}:fontcolor=white:borderw={max(1, size // 18)}"
                 f":bordercolor=black:x={x}-text_w/2:y={y}-text_h/2"
                 f":enable='between(t,{visible_from:.3f},{visible_to:.3f})'"
+                f":fontfile='{font.replace(chr(92), '/').replace(':', chr(92) + ':')}'"
             )
-            if font:
-                draw += f":fontfile='{font.replace(chr(92), '/').replace(':', chr(92) + ':')}'"
             filters.append(f"{base}{draw}{label}")
             base = label
-            inputs += 1
             continue
 
         path = clip.get("path")
@@ -119,8 +168,9 @@ def build_command(
         else:
             args += ["-ss", f"{seek:.3f}", "-t", f"{take:.3f}", "-i", path]
 
-        idx = inputs
-        inputs += 1
+        idx = next_input
+        next_input += 1
+        seq += 1
 
         chain = f"[{idx}:v]"
         steps = [f"scale={width}:{height}:force_original_aspect_ratio=decrease"]
@@ -135,13 +185,13 @@ def build_command(
             steps.append(f"format=rgba,colorchannelmixer=aa={alpha}")
         steps.append(f"setpts=PTS-STARTPTS+{visible_from:.3f}/TB")
 
-        label = f"[v{idx}]"
+        label = f"[v{seq}]"
         filters.append(f"{chain}{','.join(steps)}{label}")
 
         pos = clip.get("position", {"x": 0.0, "y": 0.0})
         ox = f"(W-w)/2+{pos.get('x', 0.0)}*W/2"
         oy = f"(H-h)/2-{pos.get('y', 0.0)}*H/2"
-        out = f"[c{idx}]"
+        out = f"[c{seq}]"
         filters.append(
             f"{base}{label}overlay=x={ox}:y={oy}"
             f":enable='between(t,{visible_from:.3f},{visible_to:.3f})'{out}"
@@ -149,7 +199,7 @@ def build_command(
         base = out
 
         if with_audio and clip.get("volume", 1.0) > 0 and clip["kind"] == "video":
-            alabel = f"[a{idx}]"
+            alabel = f"[a{seq}]"
             delay = int(round(visible_from * 1000))
             filters.append(
                 f"[{idx}:a?]atrim=0:{take:.3f},asetpts=PTS-STARTPTS,"
@@ -168,9 +218,10 @@ def build_command(
             seek = clip.get("source_start", 0.0) + max(0.0, -clip_start)
 
             args += ["-ss", f"{seek:.3f}", "-t", f"{visible_to - visible_from:.3f}", "-i", clip["path"]]
-            idx = inputs
-            inputs += 1
-            alabel = f"[a{idx}]"
+            idx = next_input
+            next_input += 1
+            seq += 1
+            alabel = f"[a{seq}]"
             delay = int(round(visible_from * 1000))
             filters.append(
                 f"[{idx}:a?]asetpts=PTS-STARTPTS,volume={clip.get('volume', 1.0)},"
